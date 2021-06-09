@@ -17,6 +17,7 @@
 #include <utility>
 
 #include "bvals/cc/bvals_cc.hpp"
+#include "interface/metadata.hpp"
 #include "mesh/mesh.hpp"
 #include "mesh/meshblock.hpp"
 #include "parthenon_arrays.hpp"
@@ -62,14 +63,10 @@ CellVariable<T>::AllocateCopy(const bool alloc_separate_fluxes_and_bvar,
     cv->AllocateData(wpmb);
   }
 
-  if (IsSet(Metadata::FillGhost)) {
-    if (alloc_separate_fluxes_and_bvar) {
-      cv->AllocateFluxesAndBdryVar(wpmb);
-    } else {
-      // set data pointer for the boundary communication
-      // Note that vbvar->var_cc will be set when stage is selected
-      cv->vbvar = vbvar;
-
+  if (alloc_separate_fluxes_and_bvar) {
+    cv->AllocateFluxesAndBdryVar(wpmb);
+  } else {
+    if (IsSet(Metadata::WithFluxes)) {
       // fluxes, coarse buffers, etc., are always a copy
       // Rely on reference counting and shallow copy of kokkos views
       cv->flux_data_ = flux_data_; // reference counted
@@ -78,8 +75,17 @@ CellVariable<T>::AllocateCopy(const bool alloc_separate_fluxes_and_bvar,
       }
     }
 
-    // These members are pointers,      // point at same memory as src
-    cv->coarse_s = coarse_s;
+    if (IsSet(Metadata::FillGhost) || IsSet(Metadata::Independent)) {
+      // no need to check mesh->multilevel, if false, we're just making a shallow copy of
+      // an empty ParArrayND
+      cv->coarse_s = coarse_s;
+
+      if (IsSet(Metadata::FillGhost)) {
+        // set data pointer for the boundary communication
+        // Note that vbvar->var_cc will be set when stage is selected
+        cv->vbvar = vbvar;
+      }
+    }
   }
 
   return cv;
@@ -136,7 +142,7 @@ void CellVariable<T>::AllocateFluxesAndBdryVar(std::weak_ptr<MeshBlock> wpmb) {
   }
 
   // Create the boundary object
-  if (IsSet(Metadata::FillGhost)) {
+  if (IsSet(Metadata::FillGhost) || IsSet(Metadata::Independent)) {
     if (wpmb.expired()) return;
     std::shared_ptr<MeshBlock> pmb = wpmb.lock();
 
@@ -147,17 +153,19 @@ void CellVariable<T>::AllocateFluxesAndBdryVar(std::weak_ptr<MeshBlock> wpmb) {
                                pmb->c_cellbounds.ncellsi(IndexDomain::entire));
     }
 
-    vbvar = std::make_shared<CellCenteredBoundaryVariable>(pmb, data, coarse_s, flux);
+    if (IsSet(Metadata::FillGhost)) {
+      vbvar = std::make_shared<CellCenteredBoundaryVariable>(pmb, data, coarse_s, flux);
 
-    // enroll CellCenteredBoundaryVariable object
-    vbvar->bvar_index = pmb->pbval->bvars.size();
-    // TODO(JMM): This means RestrictBoundaries()
-    // is called on EVERY stage, regardless of what
-    // stage needs it.
-    // The fix is to refactor BoundaryValues
-    // to expose calls at either the `Variable`
-    // or `MeshBlockData` and `MeshData` level.
-    pmb->pbval->bvars.push_back(vbvar);
+      // enroll CellCenteredBoundaryVariable object
+      vbvar->bvar_index = pmb->pbval->bvars.size();
+      // TODO(JMM): This means RestrictBoundaries()
+      // is called on EVERY stage, regardless of what
+      // stage needs it.
+      // The fix is to refactor BoundaryValues
+      // to expose calls at either the `Variable`
+      // or `MeshBlockData` and `MeshData` level.
+      pmb->pbval->bvars.push_back(vbvar);
+    }
   }
 
   mpiStatus = false;
